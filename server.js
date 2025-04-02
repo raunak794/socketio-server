@@ -14,7 +14,7 @@ const io = socketIo(server, {
   cors: {
     origin: [
       "https://demo.digeesell.ae", // Your main domain
-      "https://your-render-app.onrender.com", // Will be your Render URL
+      "https://whatsapp-socketio-8h4m.onrender.com", // Will be your Render URL
     ],
     methods: ["GET", "POST"],
   },
