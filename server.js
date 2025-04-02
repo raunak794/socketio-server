@@ -32,7 +32,7 @@ const io = socketIo(server, {
 const agents = new Set();
 const activeChats = {};
 
-  io.on('connection', (socket) => {
+io.on('connection', (socket) => {
   console.log(`New connection: ${socket.id}`);
 
   // Authentication handler with callback check
@@ -71,9 +71,6 @@ const activeChats = {};
       }
     }
   });
-
-  // ... rest of your server code
-});
 
   // Message handling
   socket.on('send_message', (data) => {
