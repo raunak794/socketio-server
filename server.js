@@ -32,19 +32,48 @@ const io = socketIo(server, {
 const agents = new Set();
 const activeChats = {};
 
-io.on('connection', (socket) => {
+  io.on('connection', (socket) => {
   console.log(`New connection: ${socket.id}`);
 
-  // Authentication handler
+  // Authentication handler with callback check
   socket.on('authenticate', ({ role }, callback) => {
     console.log(`Authentication attempt as ${role}`);
-    if (role === 'agent') {
-      agents.add(socket.id);
-      io.emit('agent_count', agents.size);
-      console.log(`Agent ${socket.id} authenticated`);
-      callback({ status: 'success', message: 'Authenticated as agent' });
+    
+    try {
+      if (role === 'agent') {
+        agents.add(socket.id);
+        io.emit('agent_count', agents.size);
+        console.log(`Agent ${socket.id} authenticated`);
+        
+        // Only call callback if provided
+        if (typeof callback === 'function') {
+          callback({ 
+            status: 'success', 
+            message: 'Authenticated as agent',
+            agentId: socket.id
+          });
+        }
+        
+        // Alternative: emit an event back
+        socket.emit('authentication_result', {
+          status: 'success',
+          agentId: socket.id
+        });
+      } else {
+        if (typeof callback === 'function') {
+          callback({ status: 'error', message: 'Invalid role' });
+        }
+      }
+    } catch (error) {
+      console.error('Authentication error:', error);
+      if (typeof callback === 'function') {
+        callback({ status: 'error', message: 'Internal server error' });
+      }
     }
   });
+
+  // ... rest of your server code
+});
 
   // Message handling
   socket.on('send_message', (data) => {
