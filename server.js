@@ -2,455 +2,218 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const mysql = require('mysql2/promise');
 
 const app = express();
-app.use(cors({
-  origin: [
-    "https://demo.digeesell.ae",
-    "https://whatsapp-socketio-8h4m.onrender.com"
-  ],
-  credentials: true
-}));
-
-// Enable JSON parsing middleware
+app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
 const server = http.createServer(app);
-const PORT = process.env.PORT || 3000;
-
-// Enhanced Socket.IO configuration
 const io = socketIo(server, {
   cors: {
-    origin: [
-      "https://demo.digeesell.ae",
-      "https://whatsapp-socketio-8h4m.onrender.com"
-    ],
+    origin: "*",
     methods: ["GET", "POST"]
-  },
-  pingTimeout: 60000,
-  pingInterval: 25000,
-  transports: ['websocket', 'polling']
+  }
 });
 
-// Store active agents and chats
-const agents = new Map(); // Map of socket.id to agent info
-const activeChats = {};   // Map of phone numbers to chat data
+// Update your server.js database configuration
+const pool = mysql.createPool({
+  host: 'localhost', // Replace with your shared hosting database server if different
+  user: 'digeesellse_whatsapp_bot',
+  password: 'mTN{bdlv9$7R',
+  database: 'digeesellse_whatsapp_bot',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
 
-// Helper function to broadcast chat updates
-function broadcastChatUpdate(phone) {
-  if (activeChats[phone]) {
-    io.emit('chat_update', {
-      phone: phone,
-      chat: activeChats[phone]
-    });
-  }
-}
-
-// Helper function to get basic chat info for listing
-function getChatList() {
-  return Object.keys(activeChats).map(phone => ({
-    phone: phone,
-    lastMessage: activeChats[phone].messages.slice(-1)[0]?.text || '',
-    timestamp: activeChats[phone].messages.slice(-1)[0]?.timestamp || Date.now(),
-    unread: activeChats[phone].unread || 0,
-    takenOver: activeChats[phone].takenOver || false
-  }));
-}
+// Store active agents
+const activeAgents = new Map();
 
 io.on('connection', (socket) => {
   console.log(`New connection: ${socket.id}`);
-  
-  // Set default transport for logging
-  socket.conn.on('upgrade', () => {
-    console.log(`Transport upgraded to: ${socket.conn.transport.name}`);
-  });
 
-  // Authentication handler
-  socket.on('authenticate', ({ role, agentId, name }, callback) => {
-    console.log(`Authentication attempt as ${role}`);
-    
+  // Agent authentication
+  socket.on('authenticate', async ({ agentId, name }, callback) => {
     try {
-      if (role === 'agent') {
-        agents.set(socket.id, {
-          id: agentId || socket.id,
-          name: name || `Agent-${socket.id.substring(0, 5)}`,
-          socketId: socket.id,
-          available: true
-        });
-        
-        io.emit('agent_count', agents.size);
-        console.log(`Agent ${socket.id} authenticated`);
-        
-        // Send success response
-        const response = { 
-          status: 'success', 
-          message: 'Authenticated as agent',
-          agentId: socket.id,
-          agentCount: agents.size,
-          chatList: getChatList()
-        };
-        
-        if (typeof callback === 'function') {
-          callback(response);
-        }
-        
-        // Also emit the response for other clients
-        socket.emit('authentication_result', response);
-      } else {
-        const error = { status: 'error', message: 'Invalid role' };
-        if (typeof callback === 'function') {
-          callback(error);
-        }
-        socket.emit('authentication_error', error);
-      }
+      // Update or create agent in database
+      const [result] = await pool.execute(
+        `INSERT INTO agents (id, name, status, socket_id, last_active) 
+         VALUES (?, ?, 'online', ?, NOW())
+         ON DUPLICATE KEY UPDATE 
+         name = VALUES(name), status = 'online', socket_id = VALUES(socket_id), last_active = NOW()`,
+        [agentId, name, socket.id]
+      );
+
+      activeAgents.set(socket.id, { agentId, name });
+      
+      // Notify all about new agent list
+      await updateAgentList();
+      
+      callback({ status: 'success', agentId });
     } catch (error) {
       console.error('Authentication error:', error);
-      const errResponse = { 
-        status: 'error', 
-        message: 'Internal server error',
-        error: error.message 
-      };
-      if (typeof callback === 'function') {
-        callback(errResponse);
-      }
-      socket.emit('authentication_error', errResponse);
+      callback({ status: 'error', message: 'Authentication failed' });
     }
   });
 
-  // Initial state request
-  socket.on('request_initial_state', (callback) => {
-    console.log('Initial state requested by:', socket.id);
+  // Handle chat takeover
+  socket.on('take_over_chat', async ({ chat_id, agent_id }, callback) => {
     try {
-      const response = {
-        status: 'success',
-        agentCount: agents.size,
-        chats: activeChats,
-        chatList: getChatList()
-      };
-      
-      if (typeof callback === 'function') {
-        callback(response);
-      } else {
-        socket.emit('initial_state', response);
-      }
-    } catch (error) {
-      console.error('Error sending initial state:', error);
-      if (typeof callback === 'function') {
-        callback({ status: 'error', message: error.message });
-      }
-    }
-  });
+      // Update chat in database
+      await pool.execute(
+        `UPDATE chats SET is_ai_active = FALSE, agent_id = ?, status = 'assigned', updated_at = NOW() 
+         WHERE id = ?`,
+        [agent_id, chat_id]
+      );
 
-  // Message handling
-  socket.on('send_message', (data, callback) => {
-    console.log('Received message from:', socket.id, 'data:', data);
-    
-    try {
-      if (!data.phone || !data.message) {
-        throw new Error('Phone and message are required');
-      }
-      
-      // Initialize chat if not exists
-      if (!activeChats[data.phone]) {
-        activeChats[data.phone] = {
-          phone: data.phone,
-          messages: [],
-          unread: 0,
-          takenOver: true, // Human is taking over
-          profileName: data.profile_name || 'Customer',
-          lastActivity: new Date().toISOString()
-        };
-      }
-      
-      // Create message object
-      const message = {
-        id: data.message_id || Date.now().toString(),
-        text: data.message,
-        direction: 'outgoing',
-        timestamp: new Date().toISOString(),
-        source: 'human',
-        sender: agents.get(socket.id)?.name || 'Agent'
-      };
-      
-      // Add to chat
-      activeChats[data.phone].messages.push(message);
-      activeChats[data.phone].lastActivity = new Date().toISOString();
-      
-      // Broadcast to all clients
-      io.emit('new_message', {
-        phone: data.phone,
-        message: message,
-        chat: activeChats[data.phone]
-      });
-      
-      // Send success response
-      const response = { 
-        status: 'success', 
-        message: 'Message sent',
-        message_id: message.id
-      };
-      
-      if (typeof callback === 'function') {
-        callback(response);
-      }
-      
-      // Also broadcast chat update
-      broadcastChatUpdate(data.phone);
-    } catch (error) {
-      console.error('Message handling error:', error);
-      const errorResponse = { 
-        status: 'error', 
-        message: error.message 
-      };
-      if (typeof callback === 'function') {
-        callback(errorResponse);
-      }
-      socket.emit('message_error', errorResponse);
-    }
-  });
+      // Get chat details
+      const [chats] = await pool.execute(
+        `SELECT c.*, u.phone, u.profile_name FROM chats c
+         JOIN users u ON c.user_id = u.id
+         WHERE c.id = ?`,
+        [chat_id]
+      );
 
-  // Chat takeover handling
-  socket.on('take_over_chat', (data, callback) => {
-    console.log('Take over chat request:', data);
-    
-    try {
-      if (!data.phone) {
-        throw new Error('Phone number is required');
+      if (chats.length === 0) {
+        return callback({ status: 'error', message: 'Chat not found' });
       }
+
+      const chat = chats[0];
       
-      // Initialize chat if not exists
-      if (!activeChats[data.phone]) {
-        activeChats[data.phone] = {
-          phone: data.phone,
-          messages: [],
-          unread: 0,
-          takenOver: true,
-          profileName: data.profile_name || 'Customer',
-          lastActivity: new Date().toISOString()
-        };
-      } else {
-        activeChats[data.phone].takenOver = true;
-      }
-      
-      // Set the agent as the handler
-      activeChats[data.phone].handler = agents.get(socket.id)?.name || 'Agent';
-      
-      // Broadcast update
+      // Notify all clients about the takeover
       io.emit('chat_taken_over', {
-        phone: data.phone,
-        chat: activeChats[data.phone],
-        agent: agents.get(socket.id)
+        chat_id,
+        phone: chat.phone,
+        profile_name: chat.profile_name,
+        agent_id,
+        agent_name: activeAgents.get(socket.id)?.name
       });
-      
-      // Send success response
-      const response = { 
-        status: 'success', 
-        message: 'Chat taken over',
-        chat: activeChats[data.phone]
-      };
-      
-      if (typeof callback === 'function') {
-        callback(response);
-      }
-      
-      // Broadcast chat update
-      broadcastChatUpdate(data.phone);
+
+      // Get chat history
+      const [messages] = await pool.execute(
+        `SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at`,
+        [chat_id]
+      );
+
+      // Send chat history to the agent who took over
+      socket.emit('chat_history', {
+        chat_id,
+        messages
+      });
+
+      callback({ status: 'success' });
     } catch (error) {
       console.error('Takeover error:', error);
-      const errorResponse = { 
-        status: 'error', 
-        message: error.message 
-      };
-      if (typeof callback === 'function') {
-        callback(errorResponse);
-      }
-      socket.emit('takeover_error', errorResponse);
+      callback({ status: 'error', message: 'Takeover failed' });
     }
   });
 
-  // Ping test endpoint
-  socket.on('ping', (callback) => {
-    const response = {
-      status: 'success',
-      serverTime: new Date().toISOString(),
-      transport: socket.conn.transport.name,
-      agentsOnline: agents.size,
-      activeChats: Object.keys(activeChats).length
-    };
-    callback(response);
+  // Handle agent messages
+  socket.on('send_agent_message', async ({ chat_id, agent_id, message }, callback) => {
+    try {
+      // Store message
+      await pool.execute(
+        `INSERT INTO messages (chat_id, sender_type, agent_id, content, direction) 
+         VALUES (?, 'agent', ?, ?, 'outgoing')`,
+        [chat_id, agent_id, message]
+      );
+
+      // Get chat details
+      const [chats] = await pool.execute(
+        `SELECT u.phone FROM chats c
+         JOIN users u ON c.user_id = u.id
+         WHERE c.id = ?`,
+        [chat_id]
+      );
+
+      if (chats.length === 0) {
+        return callback({ status: 'error', message: 'Chat not found' });
+      }
+
+      const phone = chats[0].phone;
+      
+      // Send to WhatsApp
+      // (You would implement this function to actually send via WhatsApp API)
+      sendWhatsAppMessage(phone, message);
+      
+      // Notify all clients
+      io.emit('new_agent_message', {
+        chat_id,
+        agent_id,
+        message,
+        phone
+      });
+
+      callback({ status: 'success' });
+    } catch (error) {
+      console.error('Message send error:', error);
+      callback({ status: 'error', message: 'Failed to send message' });
+    }
   });
 
   // Disconnection handler
-  socket.on('disconnect', (reason) => {
-    console.log(`Client disconnected: ${socket.id}, reason: ${reason}`);
-    
-    if (agents.has(socket.id)) {
-      agents.delete(socket.id);
-      io.emit('agent_count', agents.size);
-      console.log(`Agent ${socket.id} removed`);
-    }
-    
-    // Check if any chats were being handled by this agent
-    Object.keys(activeChats).forEach(phone => {
-      if (activeChats[phone].handler === socket.id) {
-        activeChats[phone].takenOver = false;
-        activeChats[phone].handler = null;
-        broadcastChatUpdate(phone);
+  socket.on('disconnect', async () => {
+    const agent = activeAgents.get(socket.id);
+    if (agent) {
+      activeAgents.delete(socket.id);
+      
+      // Update agent status in database
+      try {
+        await pool.execute(
+          `UPDATE agents SET status = 'offline', socket_id = NULL, last_active = NOW() 
+           WHERE id = ?`,
+          [agent.agentId]
+        );
+        
+        // Notify all about updated agent list
+        await updateAgentList();
+      } catch (error) {
+        console.error('Disconnection update error:', error);
       }
-    });
+    }
+  });
+
+  // API endpoint to get initial chat state
+  app.get('/chats', async (req, res) => {
+    try {
+      const [chats] = await pool.execute(
+        `SELECT c.*, u.phone, u.profile_name FROM chats c
+         JOIN users u ON c.user_id = u.id
+         WHERE c.status != 'closed'
+         ORDER BY c.updated_at DESC`
+      );
+      
+      // Get messages for each chat
+      for (const chat of chats) {
+        const [messages] = await pool.execute(
+          `SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at`,
+          [chat.id]
+        );
+        chat.messages = messages;
+      }
+      
+      res.json({ status: 'success', chats });
+    } catch (error) {
+      console.error('Error fetching chats:', error);
+      res.status(500).json({ status: 'error', message: 'Failed to fetch chats' });
+    }
   });
 });
 
-// HTTP endpoint for PHP webhook
-app.post('/notify', (req, res) => {
+async function updateAgentList() {
   try {
-    const { type, phone, message, message_id, profile_name } = req.body;
-    console.log('Webhook notification:', { type, phone, message });
+    const [agents] = await pool.execute(
+      `SELECT * FROM agents WHERE status = 'online' ORDER BY name`
+    );
     
-    if (!type || !phone || !message) {
-      return res.status(400).json({ 
-        status: 'error', 
-        message: 'Missing parameters: type, phone, and message are required' 
-      });
-    }
-    
-    // Initialize chat if not exists
-    if (!activeChats[phone]) {
-      activeChats[phone] = {
-        phone: phone,
-        messages: [],
-        unread: 0,
-        takenOver: false,
-        profileName: profile_name || 'Customer',
-        lastActivity: new Date().toISOString()
-      };
-    }
-    
-    // Create message object
-    const messageObj = {
-      id: message_id || Date.now().toString(),
-      text: message,
-      direction: type === 'ai_response' ? 'outgoing' : 'incoming',
-      timestamp: new Date().toISOString(),
-      source: type === 'ai_response' ? 'ai' : 'user'
-    };
-    
-    // Add to chat
-    activeChats[phone].messages.push(messageObj);
-    activeChats[phone].lastActivity = new Date().toISOString();
-    
-    // Increment unread count if not current chat
-    if (type !== 'ai_response') {
-      activeChats[phone].unread++;
-    }
-    
-    // Emit to all clients
-    io.emit(type, {
-      phone: phone,
-      message: messageObj,
-      chat: activeChats[phone]
-    });
-    
-    // Also broadcast chat update
-    broadcastChatUpdate(phone);
-    
-    res.json({ 
-      status: 'success', 
-      message: 'Notification processed',
-      message_id: messageObj.id
-    });
+    io.emit('agent_list', agents);
+    io.emit('agent_count', agents.length);
   } catch (error) {
-    console.error('Webhook error:', error);
-    res.status(500).json({ 
-      status: 'error', 
-      message: error.message 
-    });
+    console.error('Error updating agent list:', error);
   }
-});
+}
 
-// Human availability endpoint
-app.get('/human_available', (req, res) => {
-  try {
-    const available = agents.size > 0;
-    res.json({
-      status: 'success',
-      available: available,
-      agentCount: agents.size
-    });
-  } catch (error) {
-    console.error('Human availability error:', error);
-    res.status(500).json({ 
-      status: 'error', 
-      message: error.message 
-    });
-  }
-});
-
-// Get active chats endpoint
-app.get('/active_chats', (req, res) => {
-  try {
-    res.json({
-      status: 'success',
-      count: Object.keys(activeChats).length,
-      chats: getChatList()
-    });
-  } catch (error) {
-    console.error('Active chats error:', error);
-    res.status(500).json({ 
-      status: 'error', 
-      message: error.message 
-    });
-  }
-});
-
-// Get chat details endpoint
-app.get('/chat/:phone', (req, res) => {
-  try {
-    const { phone } = req.params;
-    if (!activeChats[phone]) {
-      return res.status(404).json({ 
-        status: 'error', 
-        message: 'Chat not found' 
-      });
-    }
-    
-    res.json({
-      status: 'success',
-      chat: activeChats[phone]
-    });
-  } catch (error) {
-    console.error('Chat details error:', error);
-    res.status(500).json({ 
-      status: 'error', 
-      message: error.message 
-    });
-  }
-});
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'online',
-    connections: io.engine.clientsCount,
-    agents: agents.size,
-    activeChats: Object.keys(activeChats).length,
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Start server
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`WebSocket server available at ws://localhost:${PORT}`);
-});
-
-// Error handling
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-});
-
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
+server.listen(3000, () => {
+  console.log('Server running on port 3000');
 });
