@@ -34,7 +34,7 @@ const io = new Server(server, {
 
 // Database Connection
 const pool = mysql.createPool({
-  host: 'mysql.digeesell.ae',
+  host: 'localhost',
   user: 'digeesellse_whatsapp_bot',
   password: 'mTN{bdlv9$7R',
   database: 'digeesellse_whatsapp_bot',
