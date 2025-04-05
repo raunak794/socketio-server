@@ -11,17 +11,19 @@ app.use(express.json());
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
+    origin: "*", // Update this to your dashboard domain in production
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
-// Update your server.js database configuration
+// Database configuration for your shared hosting
 const pool = mysql.createPool({
-  host: 'localhost', // Replace with your shared hosting database server if different
+  host: 'mysql.digeesell.ae',
   user: 'digeesellse_whatsapp_bot',
   password: 'mTN{bdlv9$7R',
   database: 'digeesellse_whatsapp_bot',
+  port: 3306,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
@@ -30,13 +32,31 @@ const pool = mysql.createPool({
 // Store active agents
 const activeAgents = new Map();
 
+// Notification endpoint for webhooks
+app.post('/notify', express.urlencoded({ extended: true }), async (req, res) => {
+  try {
+    const { type, ...data } = req.body;
+    io.emit(type, data);
+    res.status(200).send('Notification sent');
+  } catch (error) {
+    console.error('Notification error:', error);
+    res.status(500).send('Notification failed');
+  }
+});
+
 io.on('connection', (socket) => {
   console.log(`New connection: ${socket.id}`);
 
-  // Agent authentication
-  socket.on('authenticate', async ({ agentId, name }, callback) => {
+  // Improved authentication with error handling
+  socket.on('authenticate', async (data, callback) => {
+    if (typeof callback !== 'function') {
+      console.error('No callback provided for authentication');
+      return socket.disconnect(true);
+    }
+
     try {
-      // Update or create agent in database
+      const { agentId, name } = data;
+      
       const [result] = await pool.execute(
         `INSERT INTO agents (id, name, status, socket_id, last_active) 
          VALUES (?, ?, 'online', ?, NOW())
@@ -46,28 +66,29 @@ io.on('connection', (socket) => {
       );
 
       activeAgents.set(socket.id, { agentId, name });
-      
-      // Notify all about new agent list
       await updateAgentList();
       
       callback({ status: 'success', agentId });
     } catch (error) {
       console.error('Authentication error:', error);
       callback({ status: 'error', message: 'Authentication failed' });
+      socket.disconnect(true);
     }
   });
 
-  // Handle chat takeover
-  socket.on('take_over_chat', async ({ chat_id, agent_id }, callback) => {
+  // Chat takeover handler
+  socket.on('take_over_chat', async (data, callback) => {
+    if (typeof callback !== 'function') callback = () => {};
+    
     try {
-      // Update chat in database
+      const { chat_id, agent_id } = data;
+      
       await pool.execute(
         `UPDATE chats SET is_ai_active = FALSE, agent_id = ?, status = 'assigned', updated_at = NOW() 
          WHERE id = ?`,
         [agent_id, chat_id]
       );
 
-      // Get chat details
       const [chats] = await pool.execute(
         `SELECT c.*, u.phone, u.profile_name FROM chats c
          JOIN users u ON c.user_id = u.id
@@ -81,25 +102,12 @@ io.on('connection', (socket) => {
 
       const chat = chats[0];
       
-      // Notify all clients about the takeover
       io.emit('chat_taken_over', {
         chat_id,
         phone: chat.phone,
         profile_name: chat.profile_name,
         agent_id,
         agent_name: activeAgents.get(socket.id)?.name
-      });
-
-      // Get chat history
-      const [messages] = await pool.execute(
-        `SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at`,
-        [chat_id]
-      );
-
-      // Send chat history to the agent who took over
-      socket.emit('chat_history', {
-        chat_id,
-        messages
       });
 
       callback({ status: 'success' });
@@ -109,17 +117,19 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Handle agent messages
-  socket.on('send_agent_message', async ({ chat_id, agent_id, message }, callback) => {
+  // Agent message handler
+  socket.on('send_agent_message', async (data, callback) => {
+    if (typeof callback !== 'function') callback = () => {};
+    
     try {
-      // Store message
+      const { chat_id, agent_id, message } = data;
+      
       await pool.execute(
         `INSERT INTO messages (chat_id, sender_type, agent_id, content, direction) 
          VALUES (?, 'agent', ?, ?, 'outgoing')`,
         [chat_id, agent_id, message]
       );
 
-      // Get chat details
       const [chats] = await pool.execute(
         `SELECT u.phone FROM chats c
          JOIN users u ON c.user_id = u.id
@@ -133,12 +143,7 @@ io.on('connection', (socket) => {
 
       const phone = chats[0].phone;
       
-      // Send to WhatsApp
-      // (You would implement this function to actually send via WhatsApp API)
-      sendWhatsAppMessage(phone, message);
-      
-      // Notify all clients
-      io.emit('new_agent_message', {
+      io.emit('agent_message_sent', {
         chat_id,
         agent_id,
         message,
@@ -157,56 +162,62 @@ io.on('connection', (socket) => {
     const agent = activeAgents.get(socket.id);
     if (agent) {
       activeAgents.delete(socket.id);
-      
-      // Update agent status in database
       try {
         await pool.execute(
           `UPDATE agents SET status = 'offline', socket_id = NULL, last_active = NOW() 
            WHERE id = ?`,
           [agent.agentId]
         );
-        
-        // Notify all about updated agent list
         await updateAgentList();
       } catch (error) {
         console.error('Disconnection update error:', error);
       }
     }
   });
-
-  // API endpoint to get initial chat state
-  app.get('/chats', async (req, res) => {
-    try {
-      const [chats] = await pool.execute(
-        `SELECT c.*, u.phone, u.profile_name FROM chats c
-         JOIN users u ON c.user_id = u.id
-         WHERE c.status != 'closed'
-         ORDER BY c.updated_at DESC`
-      );
-      
-      // Get messages for each chat
-      for (const chat of chats) {
-        const [messages] = await pool.execute(
-          `SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at`,
-          [chat.id]
-        );
-        chat.messages = messages;
-      }
-      
-      res.json({ status: 'success', chats });
-    } catch (error) {
-      console.error('Error fetching chats:', error);
-      res.status(500).json({ status: 'error', message: 'Failed to fetch chats' });
-    }
-  });
 });
 
+// API endpoint to get initial chat state
+app.get('/chats', async (req, res) => {
+  try {
+    const [chats] = await pool.execute(
+      `SELECT c.*, u.phone, u.profile_name FROM chats c
+       JOIN users u ON c.user_id = u.id
+       WHERE c.status != 'closed'
+       ORDER BY c.updated_at DESC`
+    );
+    
+    res.json({ status: 'success', chats });
+  } catch (error) {
+    console.error('Error fetching chats:', error);
+    res.status(500).json({ status: 'error', message: 'Failed to fetch chats' });
+  }
+});
+
+// Get messages for a specific chat
+app.get('/messages', async (req, res) => {
+  try {
+    const { chat_id } = req.query;
+    const [messages] = await pool.execute(
+      `SELECT m.*, a.name as agent_name FROM messages m
+       LEFT JOIN agents a ON m.agent_id = a.id
+       WHERE m.chat_id = ?
+       ORDER BY m.created_at ASC`,
+      [chat_id]
+    );
+    
+    res.json({ status: 'success', messages });
+  } catch (error) {
+    console.error('Error fetching messages:', error);
+    res.status(500).json({ status: 'error', message: 'Failed to fetch messages' });
+  }
+});
+
+// Helper function to update agent list
 async function updateAgentList() {
   try {
     const [agents] = await pool.execute(
       `SELECT * FROM agents WHERE status = 'online' ORDER BY name`
     );
-    
     io.emit('agent_list', agents);
     io.emit('agent_count', agents.length);
   } catch (error) {
@@ -214,6 +225,7 @@ async function updateAgentList() {
   }
 }
 
-server.listen(3000, () => {
-  console.log('Server running on port 3000');
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
