@@ -1,21 +1,59 @@
 const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
 const cors = require('cors');
-const mysql = require('mysql2/promise');
+const { Server } = require('socket.io');
 
+// Initialize Express app
 const app = express();
-app.use(cors());
-app.use(express.json());
 
+// Create HTTP server
 const server = http.createServer(app);
-const io = socketIo(server, {
+
+// CORS configuration (allow your frontend domain)
+const allowedOrigin = 'https://demo.digeesell.ae'; // <-- your frontend URL
+app.use(cors({
+  origin: allowedOrigin,
+  methods: ['GET', 'POST'],
+  credentials: true
+}));
+
+// Create Socket.IO server
+const io = new Server(server, {
   cors: {
-    origin: "*", // Update this to your dashboard domain in production
-    methods: ["GET", "POST"],
+    origin: allowedOrigin,
+    methods: ['GET', 'POST'],
     credentials: true
   }
 });
+
+// Basic route (optional)
+app.get('/', (req, res) => {
+  res.send('WebSocket server is running...');
+});
+
+// Handle socket connection
+io.on('connection', (socket) => {
+  console.log(`✅ Client connected: ${socket.id}`);
+
+  // Listen to custom message event
+  socket.on('chat message', (msg) => {
+    console.log('📩 Message received:', msg);
+    // Broadcast message to all connected clients
+    io.emit('chat message', msg);
+  });
+
+  // Handle disconnection
+  socket.on('disconnect', () => {
+    console.log(`❌ Client disconnected: ${socket.id}`);
+  });
+});
+
+// Start the server
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
+
 
 // Database configuration for your shared hosting
 const pool = mysql.createPool({
