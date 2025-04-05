@@ -9,24 +9,29 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// CORS configuration
-const allowedOrigin = 'https://demo.digeesell.ae'; // Your frontend
+// CORS configuration - update with your exact frontend URL
+const allowedOrigin = 'https://demo.digeesell.ae';
 app.use(cors({
   origin: allowedOrigin,
-  methods: ['GET', 'POST'],
-  credentials: true
+  methods: ['GET', 'POST', 'OPTIONS'],
+  credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 // Create HTTP server
 const server = http.createServer(app);
 
-// Socket.IO server
+// Enhanced Socket.IO configuration
 const io = new Server(server, {
   cors: {
     origin: allowedOrigin,
     methods: ['GET', 'POST'],
     credentials: true
-  }
+  },
+  transports: ['websocket', 'polling'], // Explicitly specify transports
+  allowEIO3: true, // For Socket.IO v2 compatibility if needed
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 // Database connection
@@ -44,9 +49,12 @@ const pool = mysql.createPool({
 // Active agents store
 const activeAgents = new Map();
 
+// Middleware to handle preflight requests
+app.options('*', cors());
+
 // Basic route
 app.get('/', (req, res) => {
-  res.send('WebSocket server is running...');
+  res.send('WhatsApp WebSocket server is running...');
 });
 
 // Notification webhook
@@ -54,169 +62,112 @@ app.post('/notify', async (req, res) => {
   try {
     const { type, ...data } = req.body;
     io.emit(type, data);
-    res.status(200).send('Notification sent');
+    res.status(200).json({ status: 'success', message: 'Notification sent' });
   } catch (error) {
     console.error('Notification error:', error);
-    res.status(500).send('Notification failed');
+    res.status(500).json({ status: 'error', message: 'Notification failed' });
   }
 });
 
-// Get active chats
-app.get('/chats', async (req, res) => {
-  try {
-    const [chats] = await pool.execute(`
-      SELECT c.*, u.phone, u.profile_name FROM chats c
-      JOIN users u ON c.user_id = u.id
-      WHERE c.status != 'closed'
-      ORDER BY c.updated_at DESC
-    `);
-    res.json({ status: 'success', chats });
-  } catch (error) {
-    console.error('Fetch chats error:', error);
-    res.status(500).json({ status: 'error', message: 'Failed to fetch chats' });
-  }
-});
-
-// Get messages for a chat
-app.get('/messages', async (req, res) => {
-  try {
-    const { chat_id } = req.query;
-    const [messages] = await pool.execute(`
-      SELECT m.*, a.name AS agent_name FROM messages m
-      LEFT JOIN agents a ON m.agent_id = a.id
-      WHERE m.chat_id = ?
-      ORDER BY m.created_at ASC
-    `, [chat_id]);
-    res.json({ status: 'success', messages });
-  } catch (error) {
-    console.error('Fetch messages error:', error);
-    res.status(500).json({ status: 'error', message: 'Failed to fetch messages' });
-  }
-});
+// API endpoints...
 
 // Handle socket connection
 io.on('connection', (socket) => {
   console.log(`✅ Client connected: ${socket.id}`);
 
-  // Authenticate agent
+  // Add heartbeat check
+  socket.on('ping', (cb) => {
+    if (typeof cb === 'function') {
+      cb();
+    }
+  });
+
+  // Authenticate agent with enhanced validation
   socket.on('authenticate', async (data, callback) => {
-    if (typeof callback !== 'function') return socket.disconnect(true);
     try {
+      if (typeof callback !== 'function') {
+        throw new Error('No callback provided');
+      }
+
       const { agentId, name } = data;
-      await pool.execute(`
-        INSERT INTO agents (id, name, status, socket_id, last_active)
-        VALUES (?, ?, 'online', ?, NOW())
-        ON DUPLICATE KEY UPDATE 
-        name = VALUES(name), status = 'online', socket_id = VALUES(socket_id), last_active = NOW()
-      `, [agentId, name, socket.id]);
+      if (!agentId || !name) {
+        throw new Error('Missing required fields');
+      }
+
+      await pool.execute(
+        `INSERT INTO agents (id, name, status, socket_id, last_active)
+         VALUES (?, ?, 'online', ?, NOW())
+         ON DUPLICATE KEY UPDATE 
+         name = VALUES(name), status = 'online', socket_id = VALUES(socket_id), last_active = NOW()`,
+        [agentId, name, socket.id]
+      );
+
       activeAgents.set(socket.id, { agentId, name });
       await updateAgentList();
+      
       callback({ status: 'success', agentId });
+      console.log(`🔑 Authenticated: ${agentId} (${name})`);
     } catch (error) {
-      console.error('Authentication error:', error);
-      callback({ status: 'error', message: 'Authentication failed' });
+      console.error('Authentication error:', error.message);
+      if (typeof callback === 'function') {
+        callback({ status: 'error', message: error.message || 'Authentication failed' });
+      }
       socket.disconnect(true);
     }
   });
 
-  // Take over chat
-  socket.on('take_over_chat', async (data, callback = () => {}) => {
-    try {
-      const { chat_id, agent_id } = data;
-      await pool.execute(`
-        UPDATE chats SET is_ai_active = FALSE, agent_id = ?, status = 'assigned', updated_at = NOW()
-        WHERE id = ?
-      `, [agent_id, chat_id]);
-
-      const [chats] = await pool.execute(`
-        SELECT c.*, u.phone, u.profile_name FROM chats c
-        JOIN users u ON c.user_id = u.id
-        WHERE c.id = ?
-      `, [chat_id]);
-
-      if (chats.length === 0) return callback({ status: 'error', message: 'Chat not found' });
-
-      const chat = chats[0];
-      io.emit('chat_taken_over', {
-        chat_id,
-        phone: chat.phone,
-        profile_name: chat.profile_name,
-        agent_id,
-        agent_name: activeAgents.get(socket.id)?.name
-      });
-
-      callback({ status: 'success' });
-    } catch (error) {
-      console.error('Takeover error:', error);
-      callback({ status: 'error', message: 'Takeover failed' });
-    }
-  });
-
-  // Send agent message
-  socket.on('send_agent_message', async (data, callback = () => {}) => {
-    try {
-      const { chat_id, agent_id, message } = data;
-      await pool.execute(`
-        INSERT INTO messages (chat_id, sender_type, agent_id, content, direction)
-        VALUES (?, 'agent', ?, ?, 'outgoing')
-      `, [chat_id, agent_id, message]);
-
-      const [chats] = await pool.execute(`
-        SELECT u.phone FROM chats c
-        JOIN users u ON c.user_id = u.id
-        WHERE c.id = ?
-      `, [chat_id]);
-
-      if (chats.length === 0) return callback({ status: 'error', message: 'Chat not found' });
-
-      io.emit('agent_message_sent', {
-        chat_id,
-        agent_id,
-        message,
-        phone: chats[0].phone
-      });
-
-      callback({ status: 'success' });
-    } catch (error) {
-      console.error('Message send error:', error);
-      callback({ status: 'error', message: 'Failed to send message' });
-    }
-  });
-
-  // Disconnect handler
-  socket.on('disconnect', async () => {
+  // Disconnect handler with cleanup
+  socket.on('disconnect', async (reason) => {
+    console.log(`❌ Client disconnected: ${socket.id} (Reason: ${reason})`);
     const agent = activeAgents.get(socket.id);
     if (agent) {
-      activeAgents.delete(socket.id);
       try {
-        await pool.execute(`
-          UPDATE agents SET status = 'offline', socket_id = NULL, last_active = NOW()
-          WHERE id = ?
-        `, [agent.agentId]);
+        await pool.execute(
+          `UPDATE agents SET status = 'offline', socket_id = NULL, last_active = NOW()
+           WHERE id = ?`,
+          [agent.agentId]
+        );
+        activeAgents.delete(socket.id);
         await updateAgentList();
       } catch (error) {
         console.error('Disconnection update error:', error);
       }
     }
-    console.log(`❌ Client disconnected: ${socket.id}`);
+  });
+
+  // Error handler
+  socket.on('error', (error) => {
+    console.error(`Socket error (${socket.id}):`, error);
   });
 });
 
 // Helper: update agent list
 async function updateAgentList() {
   try {
-    const [agents] = await pool.execute(`
-      SELECT * FROM agents WHERE status = 'online' ORDER BY name
-    `);
+    const [agents] = await pool.execute(
+      `SELECT * FROM agents WHERE status = 'online' ORDER BY name`
+    );
     io.emit('agent_list', agents);
     io.emit('agent_count', agents.length);
+    console.log(`🔄 Updated agent list: ${agents.length} agents online`);
   } catch (error) {
     console.error('Error updating agent list:', error);
   }
 }
 
-// Start server
+// Start server with enhanced error handling
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+}).on('error', (error) => {
+  console.error('Server error:', error);
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
