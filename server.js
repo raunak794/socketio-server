@@ -170,6 +170,35 @@ app.get('/api/chats', async (req, res) => {
     }
   });
 
+  // Test route - REMOVE AFTER TESTING
+app.get('/test-db', async (req, res) => {
+  console.log("Attempting database connection...");
+  
+  try {
+    const connection = await pool.getConnection();
+    console.log("Successfully connected to database!");
+    
+    // Test a simple query
+    const [rows] = await connection.query("SELECT 1+1 AS result");
+    console.log("Query result:", rows);
+    
+    connection.release();
+    res.json({
+      status: "success",
+      message: "Database connection successful",
+      result: rows
+    });
+  } catch (error) {
+    console.error("Database connection failed:", error);
+    res.status(500).json({
+      status: "error",
+      message: "Database connection failed",
+      error: error.message,
+      stack: error.stack
+    });
+  }
+});
+
   socket.on('send_message', async ({ chat_id, agent_id, message }, callback) => {
     try {
       await pool.query(
