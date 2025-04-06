@@ -129,6 +129,47 @@ io.on('connection', (socket) => {
     }
   });
 
+  // API Endpoints for dashboard data
+app.get('/api/chats', async (req, res) => {
+    try {
+      const [chats] = await pool.query(`
+        SELECT c.id, c.user_id, u.phone, u.profile_name, 
+               c.is_ai_active, c.agent_id, c.status,
+               MAX(m.created_at) as last_message_time
+        FROM chats c
+        JOIN users u ON c.user_id = u.id
+        LEFT JOIN messages m ON m.chat_id = c.id
+        WHERE c.status != 'closed'
+        GROUP BY c.id
+        ORDER BY last_message_time DESC
+      `);
+      res.json({ status: 'success', chats });
+    } catch (error) {
+      console.error('Error fetching chats:', error);
+      res.status(500).json({ status: 'error', message: error.message });
+    }
+  });
+  
+  app.get('/api/messages', async (req, res) => {
+    try {
+      const { chat_id } = req.query;
+      if (!chat_id) throw new Error('chat_id parameter required');
+  
+      const [messages] = await pool.query(`
+        SELECT id, chat_id, sender_type, agent_id, 
+               content, direction, created_at
+        FROM messages
+        WHERE chat_id = ?
+        ORDER BY created_at ASC
+      `, [chat_id]);
+  
+      res.json({ status: 'success', messages });
+    } catch (error) {
+      console.error('Error fetching messages:', error);
+      res.status(500).json({ status: 'error', message: error.message });
+    }
+  });
+
   socket.on('send_message', async ({ chat_id, agent_id, message }, callback) => {
     try {
       await pool.query(
