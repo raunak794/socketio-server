@@ -10,7 +10,7 @@ const server = http.createServer(app);
 // Configuration - Match these with your actual credentials
 const PORT = process.env.PORT || 10000;
 const DB_CONFIG = {
-  host: '68.66.226.89',
+  host: 'digeesell.ae',
   user: 'digeesellse_whatsapp_bot',
   password: 'mTN{bdlv9$7R',
   database: 'digeesellse_whatsapp_bot',
