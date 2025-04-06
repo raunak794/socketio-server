@@ -5,186 +5,144 @@ const mysql = require('mysql2/promise');
 const { Server } = require('socket.io');
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// CORS Configuration - Update with your exact frontend URL
-const allowedOrigin = 'https://demo.digeesell.ae';
-app.use(cors({
-  origin: allowedOrigin,
-  methods: ['GET', 'POST', 'OPTIONS'],
-  credentials: true
-}));
-
 const server = http.createServer(app);
 
-// Enhanced Socket.IO Configuration
-const io = new Server(server, {
-  cors: {
-    origin: allowedOrigin,
-    methods: ['GET', 'POST'],
-    credentials: true
-  },
-  connectionStateRecovery: {
-    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
-    skipMiddlewares: true
-  },
-  allowEIO3: true // For broader client compatibility
-});
-
-// Database Connection
-const pool = mysql.createPool({
+// Configuration - Match these with your actual credentials
+const PORT = process.env.PORT || 10000;
+const DB_CONFIG = {
   host: 'localhost',
   user: 'digeesellse_whatsapp_bot',
   password: 'mTN{bdlv9$7R',
   database: 'digeesellse_whatsapp_bot',
   port: 3306,
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
-});
-
-// Active Agents Store
-const activeAgents = new Map();
-
-// Middleware to Verify Callback Function
-const verifyCallback = (socket, callback) => {
-  if (typeof callback !== 'function') {
-    console.error(`No callback provided from socket ${socket.id}`);
-    socket.emit('authentication_error', { 
-      message: 'Server requires a callback function' 
-    });
-    socket.disconnect(true);
-    return false;
-  }
-  return true;
+  connectionLimit: 10
 };
 
-// Connection Handler
+// Middleware
+app.use(cors({
+  origin: 'https://demo.digeesell.ae',
+  methods: ['GET', 'POST']
+}));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Database pool
+const pool = mysql.createPool(DB_CONFIG);
+
+// Socket.io setup
+const io = new Server(server, {
+  cors: {
+    origin: 'https://demo.digeesell.ae',
+    methods: ['GET', 'POST']
+  },
+  connectionStateRecovery: {
+    maxDisconnectionDuration: 120000
+  }
+});
+
+// Store active connections
+const activeConnections = new Map();
+
+// API Endpoints
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date() });
+});
+
+app.post('/notify', async (req, res) => {
+  try {
+    const { type, ...data } = req.body;
+    io.emit(type, data);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/human_available', async (req, res) => {
+  try {
+    const [result] = await pool.query(
+      'SELECT COUNT(*) as count FROM agents WHERE status = "online"'
+    );
+    res.json({ available: result[0].count > 0 });
+  } catch (error) {
+    res.status(500).json({ available: false });
+  }
+});
+
+// Socket.io Events
 io.on('connection', (socket) => {
-  console.log(`✅ Client connected: ${socket.id}`);
-  
-  // Set timeout for authentication
-  const authTimeout = setTimeout(() => {
-    if (!activeAgents.has(socket.id)) {
-      console.log(`⌛ Authentication timeout for ${socket.id}`);
-      socket.emit('authentication_timeout');
-      socket.disconnect(true);
-    }
-  }, 10000); // 10 seconds to authenticate
+  console.log(`New connection: ${socket.id}`);
 
-  // Authentication Handler
-  socket.on('authenticate', async (data, callback) => {
-    if (!verifyCallback(socket, callback)) return;
-
+  socket.on('authenticate', async ({ agentId, name }, callback) => {
     try {
-      const { agentId, name } = data;
+      if (!agentId || !name) throw new Error('Missing credentials');
       
-      if (!agentId || !name) {
-        throw new Error('Agent ID and name are required');
-      }
-
-      // Insert/update agent in database
-      await pool.execute(
+      await pool.query(
         `INSERT INTO agents (id, name, status, socket_id, last_active)
          VALUES (?, ?, 'online', ?, NOW())
-         ON DUPLICATE KEY UPDATE 
-         name = VALUES(name), 
-         status = 'online', 
-         socket_id = VALUES(socket_id), 
+         ON DUPLICATE KEY UPDATE
+         name = VALUES(name),
+         status = 'online',
+         socket_id = VALUES(socket_id),
          last_active = NOW()`,
         [agentId, name, socket.id]
       );
 
-      // Store active agent
-      activeAgents.set(socket.id, { agentId, name });
-      clearTimeout(authTimeout);
+      activeConnections.set(socket.id, { agentId, name });
+      callback({ status: 'success' });
       
-      // Notify all clients
-      await updateAgentList();
+      const [agents] = await pool.query('SELECT * FROM agents WHERE status = "online"');
+      io.emit('agent_count', agents.length);
       
-      // Send success response
-      callback({ 
-        status: 'success', 
-        agentId,
-        message: 'Authentication successful'
-      });
-      
-      console.log(`🔑 Authenticated: ${agentId} (${name})`);
-
     } catch (error) {
-      console.error(`Authentication error (${socket.id}):`, error.message);
-      callback({ 
-        status: 'error',
-        message: error.message || 'Authentication failed'
-      });
-      socket.disconnect(true);
+      callback({ status: 'error', message: error.message });
+      socket.disconnect();
     }
   });
 
-  // Disconnection Handler
-  socket.on('disconnect', async (reason) => {
-    console.log(`❌ Client disconnected: ${socket.id} (Reason: ${reason})`);
-    clearTimeout(authTimeout);
-    
-    const agent = activeAgents.get(socket.id);
-    if (agent) {
-      try {
-        await pool.execute(
-          `UPDATE agents SET status = 'offline', 
-           socket_id = NULL, 
-           last_active = NOW() 
-           WHERE id = ?`,
-          [agent.agentId]
-        );
-        activeAgents.delete(socket.id);
-        await updateAgentList();
-      } catch (error) {
-        console.error('Disconnection update error:', error);
-      }
+  socket.on('disconnect', async () => {
+    const connection = activeConnections.get(socket.id);
+    if (connection) {
+      await pool.query(
+        'UPDATE agents SET status = "offline" WHERE id = ?',
+        [connection.agentId]
+      );
+      activeConnections.delete(socket.id);
+      
+      const [agents] = await pool.query('SELECT * FROM agents WHERE status = "online"');
+      io.emit('agent_count', agents.length);
     }
   });
 
-  // Error Handler
-  socket.on('error', (error) => {
-    console.error(`Socket error (${socket.id}):`, error);
+  // Custom events for chat handling
+  socket.on('take_over_chat', async ({ chat_id, agent_id }, callback) => {
+    try {
+      await pool.query(
+        'UPDATE chats SET is_ai_active = 0, agent_id = ? WHERE id = ?',
+        [agent_id, chat_id]
+      );
+      io.emit('chat_taken_over', { chat_id, agent_id });
+      callback({ status: 'success' });
+    } catch (error) {
+      callback({ status: 'error', message: error.message });
+    }
+  });
+
+  socket.on('send_message', async ({ chat_id, agent_id, message }, callback) => {
+    try {
+      await pool.query(
+        'INSERT INTO messages (chat_id, sender_type, agent_id, content, direction) VALUES (?, "agent", ?, ?, "outgoing")',
+        [chat_id, agent_id, message]
+      );
+      io.emit('new_agent_message', { chat_id, message, agent_id });
+      callback({ status: 'success' });
+    } catch (error) {
+      callback({ status: 'error', message: error.message });
+    }
   });
 });
 
-// Update Agent List Function
-async function updateAgentList() {
-  try {
-    const [agents] = await pool.execute(
-      `SELECT id, name, status FROM agents 
-       WHERE status = 'online' 
-       ORDER BY last_active DESC`
-    );
-    
-    io.emit('agent_list_update', { 
-      status: 'success',
-      agents,
-      count: agents.length
-    });
-    
-    console.log(`🔄 Updated agent list: ${agents.length} active agents`);
-  } catch (error) {
-    console.error('Agent list update error:', error);
-  }
-}
-
-// Start Server
-const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-}).on('error', (error) => {
-  console.error('Server startup error:', error);
-});
-
-// Global Error Handlers
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+  console.log(`Server running on port ${PORT}`);
 });
