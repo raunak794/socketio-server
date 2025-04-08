@@ -57,15 +57,16 @@ const io = new Server(server, {
 
 // Store active connections
 const activeConnections = new Map();
-// Periodic chat sync
-setInterval(() => {
-  io.emit('request_chat_refresh');
+// Replace with this proper server-side implementation:
+const syncInterval = setInterval(() => {
+  io.emit('chat_refresh_request');
 }, 30000); // Every 30 seconds
 
-// Frontend listener
-this.socket.on('request_chat_refresh', () => {
-  this.loadInitialData();
+// Clean up on server shutdown
+process.on('SIGTERM', () => {
+  clearInterval(syncInterval);
 });
+
 // ==================== API ENDPOINTS ====================
 
 // Health check
