@@ -319,7 +319,14 @@ socket.on('send_manual_message', async ({ chat_id, agent_id, message }, callback
   }
 });
 });
+setInterval(() => {
+  io.emit('request_chat_refresh');
+}, 30000); // Every 30 seconds
 
+// Frontend listener
+this.socket.on('request_chat_refresh', () => {
+  this.loadInitialData();
+});
 // Start server
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
