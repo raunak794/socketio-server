@@ -57,7 +57,15 @@ const io = new Server(server, {
 
 // Store active connections
 const activeConnections = new Map();
+// Periodic chat sync
+setInterval(() => {
+  io.emit('request_chat_refresh');
+}, 30000); // Every 30 seconds
 
+// Frontend listener
+this.socket.on('request_chat_refresh', () => {
+  this.loadInitialData();
+});
 // ==================== API ENDPOINTS ====================
 
 // Health check
