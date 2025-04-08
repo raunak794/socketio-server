@@ -218,21 +218,14 @@ io.on('connection', (socket) => {
 
   // Disconnection handler
   socket.on('disconnect', async () => {
-    console.log(`❌ Disconnected: ${socket.id}`);
-    const connection = activeConnections.get(socket.id);
-    if (connection) {
-      try {
-        await pool.query(
-          'UPDATE agents SET status = "offline" WHERE id = ?',
-          [connection.agentId]
-        );
-        activeConnections.delete(socket.id);
-        
-        const [agents] = await pool.query('SELECT * FROM agents WHERE status = "online"');
-        io.emit('agent_count', agents.length);
-      } catch (error) {
-        console.error('Disconnection update error:', error);
-      }
+    const agent = activeConnections.get(socket.id);
+    if (agent) {
+      await pool.query(
+        'UPDATE agents SET status = "offline", socket_id = NULL WHERE id = ?',
+        [agent.id]
+      );
+      activeConnections.delete(socket.id);
+      io.emit('agent_disconnected', agent.id);
     }
   });
 
@@ -251,28 +244,80 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Message sending handler
-  socket.on('send_message', async ({ chat_id, agent_id, message }, callback) => {
-    try {
-      await pool.query(
-        `INSERT INTO messages 
-        (chat_id, sender_type, agent_id, content, direction) 
-        VALUES (?, "agent", ?, ?, "outgoing")`,
-        [chat_id, agent_id, message]
-      );
-      
-      io.emit('new_agent_message', { 
-        chat_id, 
-        message, 
-        agent_id 
-      });
-      
-      callback({ status: 'success' });
-    } catch (error) {
-      console.error('Message sending error:', error);
-      callback({ status: 'error', message: error.message });
+ // Enhanced message handling
+socket.on('send_manual_message', async ({ chat_id, agent_id, message }, callback) => {
+  try {
+    // 1. Verify agent exists
+    const [[agent]] = await pool.query(
+      'SELECT id, name FROM agents WHERE id = ? AND status = "online"',
+      [agent_id]
+    );
+    if (!agent) throw new Error('Agent not found or offline');
+
+    // 2. Get chat details
+    const [[chat]] = await pool.query(
+      `SELECT u.phone, c.user_id 
+       FROM chats c
+       JOIN users u ON c.user_id = u.id
+       WHERE c.id = ?`,
+      [chat_id]
+    );
+    if (!chat) throw new Error('Chat not found');
+
+    // 3. Store in database
+    const [dbResult] = await pool.query(
+      `INSERT INTO messages 
+       (chat_id, sender_type, agent_id, content, direction, created_at)
+       VALUES (?, 'agent', ?, ?, 'outgoing', NOW())`,
+      [chat_id, agent_id, message]
+    );
+
+    // 4. Send via WhatsApp API
+    const whatsappResponse = await fetch(
+      `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to: chat.phone,
+          type: "text",
+          text: { body: message }
+        })
+      }
+    );
+
+    if (!whatsappResponse.ok) {
+      throw new Error('WhatsApp API request failed');
     }
-  });
+
+    // 5. Broadcast to all dashboards
+    const newMessage = {
+      id: dbResult.insertId,
+      chat_id,
+      sender_type: 'agent',
+      agent_id,
+      content: message,
+      direction: 'outgoing',
+      created_at: new Date().toISOString()
+    };
+
+    io.emit('new_manual_message', newMessage);
+    callback({ status: 'success', message: newMessage });
+
+  } catch (error) {
+    console.error('Manual message error:', error);
+    callback({ 
+      status: 'error', 
+      message: error.message,
+      details: error.stack 
+    });
+  }
+});
 });
 
 // Start server
