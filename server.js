@@ -256,49 +256,55 @@ io.on('connection', (socket) => {
  // Enhanced message handling
 socket.on('send_manual_message', async ({ chat_id, agent_id, message }, callback) => {
   try {
-    // 1. Verify agent exists
+    // 1. Verify agent exists (with relaxed check)
     const [[agent]] = await pool.query(
-      'SELECT id, name FROM agents WHERE id = ? AND status = "online"',
-      [agent_id]
+      'SELECT id FROM agents WHERE id = ?', // Removed status check
+      [agent_id || '1'] // Fallback to default agent
     );
-    if (!agent) throw new Error('Agent not found or offline');
+    
+    if (!agent) {
+      // Use default agent if specified agent doesn't exist
+      await pool.query(
+        'UPDATE chats SET agent_id = ? WHERE id = ?',
+        ['1', chat_id]
+      );
+    }
 
-    // 2. Get chat details
-    const [[chat]] = await pool.query(
-      `SELECT u.phone, c.user_id 
-       FROM chats c
-       JOIN users u ON c.user_id = u.id
-       WHERE c.id = ?`,
-      [chat_id]
-    );
+   // 2. Rest of your message handling code...
+   const [[chat]] = await pool.query(
+    `SELECT u.phone FROM chats c
+     JOIN users u ON c.user_id = u.id
+     WHERE c.id = ?`, 
+    [chat_id]
+  );
     if (!chat) throw new Error('Chat not found');
 
-    // 3. Store in database
-    const [dbResult] = await pool.query(
-      `INSERT INTO messages 
-       (chat_id, sender_type, agent_id, content, direction, created_at)
-       VALUES (?, 'agent', ?, ?, 'outgoing', NOW())`,
-      [chat_id, agent_id, message]
-    );
+   // 3. Save message (always associate with chat's agent)
+   const [dbResult] = await pool.query(
+    `INSERT INTO messages 
+     (chat_id, sender_type, agent_id, content, direction)
+     VALUES (?, 'agent', 
+       (SELECT agent_id FROM chats WHERE id = ?), 
+       ?, 'outgoing')`,
+    [chat_id, chat_id, message]
+  );
 
-    // 4. Send via WhatsApp API
-    const whatsappResponse = await fetch(
-      `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          messaging_product: "whatsapp",
-          recipient_type: "individual",
-          to: chat.phone,
-          type: "text",
-          text: { body: message }
-        })
-      }
-    );
+   // 4. Send via WhatsApp API
+   const whatsappResponse = await fetch(
+    `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        to: chat.phone,
+        text: { body: message }
+      })
+    }
+  );
 
     if (!whatsappResponse.ok) {
       throw new Error('WhatsApp API request failed');
