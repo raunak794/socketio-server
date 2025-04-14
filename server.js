@@ -23,7 +23,7 @@ const DB_CONFIG = {
 
 // Middleware
 app.use(cors({
-  origin: 'https://digeesell.ae',
+  origin: 'https://whatsapp.digeesell.ae/',
   methods: ['GET', 'POST'],
   credentials: true
 }));
@@ -47,7 +47,7 @@ pool.getConnection()
 // Socket.io setup
 const io = new Server(server, {
   cors: {
-    origin: 'https://digeesell.ae',
+    origin: 'https://whatsapp.digeesell.ae/',
     methods: ['GET', 'POST']
   },
   connectionStateRecovery: {
