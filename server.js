@@ -18,7 +18,8 @@ const DB_CONFIG = {
   waitForConnections: true,
   connectionLimit: 10,
   connectTimeout: 10000, // 10 seconds timeout
-  namedPlaceholders: true
+  namedPlaceholders: true,
+  timezone: '+00:00'
 };
 
 // Middleware
@@ -280,14 +281,15 @@ socket.on('send_manual_message', async ({ chat_id, agent_id, message }, callback
     if (!chat) throw new Error('Chat not found');
 
    // 3. Save message (always associate with chat's agent)
+   // In your send_manual_message handler
    const [dbResult] = await pool.query(
-    `INSERT INTO messages 
-     (chat_id, sender_type, agent_id, content, direction)
-     VALUES (?, 'agent', 
-       (SELECT agent_id FROM chats WHERE id = ?), 
-       ?, 'outgoing')`,
-    [chat_id, chat_id, message]
-  );
+     `INSERT INTO messages 
+      (chat_id, sender_type, agent_id, content, direction, created_at)
+      VALUES (?, 'agent', 
+        (SELECT agent_id FROM chats WHERE id = ?), 
+        ?, 'outgoing', UTC_TIMESTAMP())`, // Use UTC_TIMESTAMP()
+     [chat_id, chat_id, message]
+   );
 
    // 4. Send via WhatsApp API
    const whatsappResponse = await fetch(
