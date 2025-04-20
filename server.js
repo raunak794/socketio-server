@@ -69,7 +69,10 @@ process.on('SIGTERM', () => {
 });
 
 // ==================== API ENDPOINTS ====================
-
+// Add this near your server startup
+console.log('Server timezone:', Intl.DateTimeFormat().resolvedOptions().timeZone);
+console.log('Current server time:', new Date());
+console.log('Current UTC time:', new Date().toISOString());
 // Health check
 app.get('/health', (req, res) => {
   res.json({ 
