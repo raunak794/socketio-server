@@ -339,54 +339,7 @@ socket.on('send_manual_message', async ({ chat_id, agent_id, message }, callback
   }
 });
 });
-// When sending AI responses, ensure UTC timestamp
-socket.on('ai_response', async (data) => {
-  try {
-    const [result] = await pool.query(
-      `INSERT INTO messages 
-       (chat_id, sender_type, content, direction, created_at)
-       VALUES (?, 'ai', ?, 'outgoing', UTC_TIMESTAMP())`,
-      [data.chat_id, data.message]
-    );
 
-    // Emit with proper timestamp
-    io.emit('ai_response', {
-      ...data,
-      message_id: result.insertId,
-      created_at: new Date().toISOString() // UTC format
-    });
-  } catch (error) {
-    console.error('AI response error:', error);
-  }
-});
-// In your WhatsApp webhook handler (where you process incoming messages)
-app.post('/whatsapp-webhook', async (req, res) => {
-  try {
-    const message = req.body;
-    const timestamp = new Date(message.timestamp * 1000); // WhatsApp uses Unix timestamp
-    
-    const [result] = await pool.query(
-      `INSERT INTO messages 
-       (chat_id, sender_type, content, direction, created_at)
-       VALUES (?, 'user', ?, 'incoming', ?)`,
-      [message.chat_id, message.text, timestamp.toISOString()]
-    );
-
-    io.emit('new_message', {
-      chat_id: message.chat_id,
-      message_id: result.insertId,
-      content: message.text,
-      sender_type: 'user',
-      direction: 'incoming',
-      created_at: timestamp.toISOString()
-    });
-
-    res.sendStatus(200);
-  } catch (error) {
-    console.error('Webhook error:', error);
-    res.status(500).send(error.message);
-  }
-});
 // Start server
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
