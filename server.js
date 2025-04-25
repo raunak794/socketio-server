@@ -141,7 +141,40 @@ app.get('/human_available', async (req, res) => {
     res.status(500).json({ available: false, error: error.message });
   }
 });
-
+// In server.js, add this to the socket.io handlers:
+socket.on('set_chat_mode', async ({ chat_id, is_ai_active, agent_id }, callback) => {
+  try {
+      await pool.query(
+          'UPDATE chats SET is_ai_active = ?, agent_id = ? WHERE id = ?',
+          [is_ai_active, is_ai_active ? null : agent_id, chat_id]
+      );
+      
+      io.emit('chat_mode_changed', { 
+          chat_id, 
+          is_ai_active: Boolean(is_ai_active),
+          agent_id: is_ai_active ? null : agent_id
+      });
+      
+      callback({ status: 'success' });
+  } catch (error) {
+      console.error('Error changing chat mode:', error);
+      callback({ status: 'error', message: error.message });
+  }
+});
+// Add this to setupSocketEvents():
+this.socket.on('chat_mode_changed', (data) => {
+  const chatKey = `chat_${data.chat_id}`;
+  if (this.chats[chatKey]) {
+      this.chats[chatKey].is_ai_active = data.is_ai_active;
+      this.chats[chatKey].agent_id = data.agent_id;
+      
+      if (this.currentChat === chatKey) {
+          this.updateModeUI();
+      }
+      
+      this.updateChatListItem(chatKey);
+  }
+});
 // Get all active chats
 app.get('/api/chats', async (req, res) => {
   try {
