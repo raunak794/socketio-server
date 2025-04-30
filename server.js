@@ -21,12 +21,7 @@ const DB_CONFIG = {
   namedPlaceholders: true,
   timezone: '+00:00'
 };
-const [dbResult] = await pool.query(
-  `INSERT INTO messages 
-   (chat_id, sender_type, agent_id, content, direction, created_at)
-   VALUES (?, 'agent', ?, ?, 'outgoing', UTC_TIMESTAMP())`,
-  [chat_id, fixedAgentId, message]
-);
+
 // Middleware
 app.use(cors({
   origin: 'https://whatsapp.digeesell.ae',
