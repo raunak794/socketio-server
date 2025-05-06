@@ -72,20 +72,7 @@ process.on('SIGTERM', () => {
   clearInterval(syncInterval);
   pool.end();
 });
-// Add this in your socket.io connection handler
-socket.on('request_chat_update', async (chatId, callback) => {
-  try {
-    const [messages] = await pool.query(`
-      SELECT * FROM messages 
-      WHERE chat_id = ? 
-      ORDER BY created_at ASC
-    `, [chatId]);
-    
-    callback({ status: 'success', messages });
-  } catch (error) {
-    callback({ status: 'error', message: error.message });
-  }
-});
+
 // ==================== API ENDPOINTS ====================
 app.get('/health', (req, res) => {
   res.json({ 
@@ -187,6 +174,21 @@ app.get('/api/messages', async (req, res) => {
 io.on('connection', (socket) => {
   console.log(`🔌 New connection: ${socket.id}`);
 
+  // Add the request_chat_update handler INSIDE the connection callback
+  socket.on('request_chat_update', async (chatId, callback) => {
+    try {
+      const [messages] = await pool.query(`
+        SELECT * FROM messages 
+        WHERE chat_id = ? 
+        ORDER BY created_at ASC
+      `, [chatId]);
+      
+      callback({ status: 'success', messages });
+    } catch (error) {
+      callback({ status: 'error', message: error.message });
+    }
+  });
+
   // Authentication handler
   socket.on('authenticate', async ({ agentId, name }, callback) => {
     try {
@@ -214,6 +216,8 @@ io.on('connection', (socket) => {
       socket.disconnect();
     }
   });
+
+
 
   socket.on('disconnect', async () => {
     const agent = activeConnections.get(socket.id);
