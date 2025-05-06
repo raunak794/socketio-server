@@ -19,8 +19,7 @@ const DB_CONFIG = {
   connectionLimit: 10,
   connectTimeout: 10000,
   namedPlaceholders: true,
-  timezone: '+00:00',
-  
+  timezone: '+00:00'
 };
 
 // Middleware
@@ -46,7 +45,7 @@ pool.getConnection()
     process.exit(1);
   });
 
-// Add to Socket.IO setup
+// Socket.io setup
 const io = new Server(server, {
   cors: {
     origin: 'https://whatsapp.digeesell.ae',
@@ -54,9 +53,7 @@ const io = new Server(server, {
   },
   connectionStateRecovery: {
     maxDisconnectionDuration: 120000
-  },
-  pingTimeout: 60000,  // 60 seconds
-  pingInterval: 25000   // 25 seconds
+  }
 });
 
 // Store active connections
@@ -73,28 +70,6 @@ process.on('SIGTERM', () => {
   pool.end();
 });
 
-// Add this to your server initialization
-setInterval(() => {
-  const now = Date.now();
-  activeConnections.forEach((connection, socketId) => {
-    if (now - (connection.lastHeartbeat || 0) > 90000) { // 90 seconds
-      io.sockets.sockets.get(socketId)?.disconnect();
-      activeConnections.delete(socketId);
-    }
-  });
-}, 60000); // Run every minute
-// Add periodic connection check
-setInterval(async () => {
-  try {
-    const conn = await pool.getConnection();
-    await conn.ping();
-    conn.release();
-  } catch (error) {
-    console.error('Database connection lost, recreating pool');
-    pool.end();
-    pool = mysql.createPool(DB_CONFIG);
-  }
-}, 300000);
 // ==================== API ENDPOINTS ====================
 app.get('/health', (req, res) => {
   res.json({ 
@@ -196,11 +171,6 @@ app.get('/api/messages', async (req, res) => {
 io.on('connection', (socket) => {
   console.log(`🔌 New connection: ${socket.id}`);
 
-   // Heartbeat monitoring
-   socket.on('heartbeat', (data) => {
-    activeConnections.get(socket.id).lastHeartbeat = Date.now();
-  });
-
   // Authentication handler
   socket.on('authenticate', async ({ agentId, name }, callback) => {
     try {
@@ -261,36 +231,66 @@ io.on('connection', (socket) => {
   });
 
   socket.on('send_manual_message', async ({ chat_id, agent_id, message }, callback) => {
-    const MAX_RETRIES = 3;
-    let attempts = 0;
-    
-    const sendMessage = async () => {
-      try {
-        attempts++;
-        
-        // Your existing message sending logic
-        const [[chat]] = await pool.query(`SELECT...`);
-        const [dbResult] = await pool.query(`INSERT...`);
-        
-        const whatsappResponse = await fetch(/* WhatsApp API call */);
-        
-        if (!whatsappResponse.ok) throw new Error('WhatsApp API failed');
-        
-        const newMessage = { /* message data */ };
-        io.emit('new_manual_message', newMessage);
-        callback({ status: 'success', message: newMessage });
-        
-      } catch (error) {
-        if (attempts < MAX_RETRIES) {
-          console.log(`Retrying (${attempts}/${MAX_RETRIES})...`);
-          await new Promise(resolve => setTimeout(resolve, 2000 * attempts));
-          return sendMessage();
+    try {
+      // Use fixed agent ID 1
+      const fixedAgentId = 1;
+      
+      const [[chat]] = await pool.query(
+        `SELECT u.phone FROM chats c
+         JOIN users u ON c.user_id = u.id
+         WHERE c.id = ?`, 
+        [chat_id]
+      );
+      
+      if (!chat) throw new Error('Chat not found');
+  
+      // Insert message with fixed agent_id
+      const [dbResult] = await pool.query(
+        `INSERT INTO messages 
+         (chat_id, sender_type, agent_id, content, direction, created_at)
+         VALUES (?, 'agent', ?, ?, 'outgoing', UTC_TIMESTAMP())`,
+        [chat_id, fixedAgentId, message]
+      );
+  
+      // Send via WhatsApp API
+      const whatsappResponse = await fetch(
+        `https://graph.facebook.com/v18.0/${process.env.PHONE_NUMBER_ID}/messages`,
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            messaging_product: "whatsapp",
+            to: chat.phone,
+            text: { body: message }
+          })
         }
-        callback({ status: 'error', message: error.message });
+      );
+  
+      if (!whatsappResponse.ok) {
+        throw new Error('WhatsApp API request failed');
       }
-    };
-    
-    await sendMessage();
+  
+      const newMessage = {
+        id: dbResult.insertId,
+        chat_id,
+        sender_type: 'agent',
+        agent_id: fixedAgentId,
+        content: message,
+        direction: 'outgoing',
+        created_at: new Date().toISOString()
+      };
+  
+      io.emit('new_manual_message', newMessage);
+      callback({ status: 'success', message: newMessage });
+    } catch (error) {
+      callback({ 
+        status: 'error', 
+        message: error.message
+      });
+    }
   });
 });
 
