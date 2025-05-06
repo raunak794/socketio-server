@@ -52,8 +52,11 @@ const io = new Server(server, {
     methods: ['GET', 'POST']
   },
   connectionStateRecovery: {
-    maxDisconnectionDuration: 120000
-  }
+    maxDisconnectionDuration: 2 * 60 * 1000, // 2 minutes
+    skipMiddlewares: true
+  },
+  pingInterval: 10000,
+  pingTimeout: 5000
 });
 
 // Store active connections
@@ -69,7 +72,20 @@ process.on('SIGTERM', () => {
   clearInterval(syncInterval);
   pool.end();
 });
-
+// Add this in your socket.io connection handler
+socket.on('request_chat_update', async (chatId, callback) => {
+  try {
+    const [messages] = await pool.query(`
+      SELECT * FROM messages 
+      WHERE chat_id = ? 
+      ORDER BY created_at ASC
+    `, [chatId]);
+    
+    callback({ status: 'success', messages });
+  } catch (error) {
+    callback({ status: 'error', message: error.message });
+  }
+});
 // ==================== API ENDPOINTS ====================
 app.get('/health', (req, res) => {
   res.json({ 
@@ -284,6 +300,7 @@ io.on('connection', (socket) => {
       };
   
       io.emit('new_manual_message', newMessage);
+      
       callback({ status: 'success', message: newMessage });
     } catch (error) {
       callback({ 
@@ -292,6 +309,7 @@ io.on('connection', (socket) => {
       });
     }
   });
+  
 });
 
 // Start server
