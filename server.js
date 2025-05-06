@@ -260,13 +260,28 @@ io.on('connection', (socket) => {
       
       if (!chat) throw new Error('Chat not found');
   
-      // Insert message with fixed agent_id
+      // Insert message with initial status as 'sent'
       const [dbResult] = await pool.query(
         `INSERT INTO messages 
-         (chat_id, sender_type, agent_id, content, direction, created_at)
-         VALUES (?, 'agent', ?, ?, 'outgoing', UTC_TIMESTAMP())`,
+         (chat_id, sender_type, agent_id, content, direction, status, created_at)
+         VALUES (?, 'agent', ?, ?, 'outgoing', 'sent', UTC_TIMESTAMP())`,
         [chat_id, fixedAgentId, message]
       );
+  
+      // Create the message object immediately
+      const newMessage = {
+        id: dbResult.insertId,
+        chat_id,
+        sender_type: 'agent',
+        agent_id: fixedAgentId,
+        content: message,
+        direction: 'outgoing',
+        status: 'sent', // Initial status
+        created_at: new Date().toISOString()
+      };
+  
+      // Emit immediately with 'sent' status
+      io.emit('new_manual_message', newMessage);
   
       // Send via WhatsApp API
       const whatsappResponse = await fetch(
@@ -285,27 +300,48 @@ io.on('connection', (socket) => {
         }
       );
   
-      if (!whatsappResponse.ok) {
-        throw new Error('WhatsApp API request failed');
-      }
-  
-      const newMessage = {
-        id: dbResult.insertId,
-        chat_id,
-        sender_type: 'agent',
-        agent_id: fixedAgentId,
-        content: message,
-        direction: 'outgoing',
-        created_at: new Date().toISOString()
-      };
-  
-      io.emit('new_manual_message', newMessage);
+      const responseData = await whatsappResponse.json();
       
-      callback({ status: 'success', message: newMessage });
+      if (whatsappResponse.ok) {
+        // Update status to 'delivered' if successful
+        await pool.query(
+          'UPDATE messages SET status = "delivered" WHERE id = ?',
+          [dbResult.insertId]
+        );
+        
+        // Update the message object
+        newMessage.status = 'delivered';
+        newMessage.whatsapp_id = responseData.messages[0].id;
+        
+        // Emit the updated status
+        io.emit('message_status_update', {
+          message_id: dbResult.insertId,
+          status: 'delivered',
+          whatsapp_id: responseData.messages[0].id
+        });
+        
+        callback({ status: 'success', message: newMessage });
+      } else {
+        throw new Error(responseData.error.message || 'WhatsApp API request failed');
+      }
     } catch (error) {
+      // Update status to 'failed' if error occurs
+      if (dbResult && dbResult.insertId) {
+        await pool.query(
+          'UPDATE messages SET status = "failed" WHERE id = ?',
+          [dbResult.insertId]
+        );
+        
+        io.emit('message_status_update', {
+          message_id: dbResult.insertId,
+          status: 'failed',
+          error: error.message
+        });
+      }
+      
       callback({ 
         status: 'error', 
-        message: error.message
+        message: error.message 
       });
     }
   });
