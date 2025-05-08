@@ -257,28 +257,37 @@ io.on('connection', (socket) => {
   try {
     // 1. Get database connection
     connection = await pool.getConnection();
+     // Use fixed agent ID 1 instead of the provided agent_id
+     const fixedAgentId = 1;
+    
     // 1. Verify agent exists
-    const [agent] = await connection.query(
-      'SELECT id FROM agents WHERE id = ?',
-      [agent_id]
-    );
+    // const [agent] = await connection.query(
+    //   'SELECT id FROM agents WHERE id = ?',
+    //   [agent_id]
+    // );
     
     if (agent.length === 0) {
       throw new Error(`Agent with ID ${agent_id} not found`);
     }
 
-    // 2. Verify chat exists and get phone number
+    // Verify chat exists
     const [[chat]] = await connection.query(
-      `SELECT u.phone, c.is_ai_active, c.agent_id 
-       FROM chats c
+      `SELECT u.phone FROM chats c
        JOIN users u ON c.user_id = u.id
        WHERE c.id = ?`, 
       [chat_id]
     );
     
-    if (!chat) {
-      throw new Error('Chat not found');
-    }
+    if (!chat) throw new Error('Chat not found');
+
+    // Insert message with fixed agent ID
+    [dbResult] = await connection.query(
+      `INSERT INTO messages 
+       (chat_id, sender_type, agent_id, content, direction, status, created_at)
+       VALUES (?, 'agent', ?, ?, 'outgoing', 'sent', UTC_TIMESTAMP())`,
+      [chat_id, fixedAgentId, message]
+    );
+
 
     // 3. Verify human mode is active
     if (chat.is_ai_active) {
