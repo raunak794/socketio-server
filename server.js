@@ -257,7 +257,16 @@ io.on('connection', (socket) => {
   try {
     // 1. Get database connection
     connection = await pool.getConnection();
+    // 1. Verify agent exists
+    const [agent] = await connection.query(
+      'SELECT id FROM agents WHERE id = ?',
+      [agent_id]
+    );
     
+    if (agent.length === 0) {
+      throw new Error(`Agent with ID ${agent_id} not found`);
+    }
+
     // 2. Verify chat exists and get phone number
     const [[chat]] = await connection.query(
       `SELECT u.phone, c.is_ai_active, c.agent_id 
