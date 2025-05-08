@@ -192,8 +192,10 @@ io.on('connection', (socket) => {
   // Authentication handler
   socket.on('authenticate', async ({ agentId, name }, callback) => {
     try {
-      if (!agentId || !name) throw new Error('Missing credentials');
-      
+      // Dashboard connections should use agentId = 1
+      const isDashboard = name === 'Dashboard User';
+      const effectiveAgentId = isDashboard ? 1 : agentId;
+  
       await pool.query(
         `INSERT INTO agents (id, name, status, socket_id, last_active)
          VALUES (?, ?, 'online', ?, NOW())
@@ -202,10 +204,10 @@ io.on('connection', (socket) => {
          status = 'online',
          socket_id = VALUES(socket_id),
          last_active = NOW()`,
-        [agentId, name, socket.id]
+        [effectiveAgentId, name, socket.id]
       );
-
-      activeConnections.set(socket.id, { agentId, name });
+  
+      activeConnections.set(socket.id, { agentId: effectiveAgentId, name });
       
       const [agents] = await pool.query('SELECT * FROM agents WHERE status = "online"');
       io.emit('agent_count', agents.length);
