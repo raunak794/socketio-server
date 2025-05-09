@@ -251,7 +251,41 @@ io.on('connection', (socket) => {
       callback({ status: 'error', message: error.message });
     }
   });
+// Add to your server.js
+const checkDeliveryStatus = async (messageId, phone) => {
+  try {
+    const response = await fetch(
+      `https://graph.facebook.com/v18.0/${messageId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${process.env.WHATSAPP_TOKEN}`
+        }
+      }
+    );
+    
+    const data = await response.json();
+    return data.status === 'delivered';
+  } catch (error) {
+    console.error('Delivery check failed:', error);
+    return false;
+  }
+};
 
+// Then modify your send logic to include:
+setTimeout(async () => {
+  const isDelivered = await checkDeliveryStatus(responseData.messages[0].id, chat.phone);
+  if (!isDelivered) {
+    await connection.query(
+      'UPDATE messages SET status = "failed", error = ? WHERE id = ?',
+      ['Message not delivered to user', dbResult.insertId]
+    );
+    io.emit('message_status_update', {
+      message_id: dbResult.insertId,
+      status: 'failed',
+      error: 'Message not delivered to user'
+    });
+  }
+}, 30000); // Check after 30 seconds
   socket.on('send_manual_message', async ({ chat_id, message }, callback) => {
     let dbResult;
     let connection;
@@ -264,9 +298,13 @@ io.on('connection', (socket) => {
       
       // Verify chat exists
       const [[chat]] = await connection.query(
-        `SELECT u.phone, c.is_ai_active FROM chats c
+        `SELECT u.phone, c.is_ai_active, 
+                MAX(m.created_at) as last_message_time
+         FROM chats c
          JOIN users u ON c.user_id = u.id
-         WHERE c.id = ?`, 
+         LEFT JOIN messages m ON m.chat_id = c.id
+         WHERE c.id = ?
+         GROUP BY c.id, u.phone, c.is_ai_active`, 
         [chat_id]
       );
       
@@ -278,14 +316,54 @@ io.on('connection', (socket) => {
       if (chat.is_ai_active) {
         throw new Error('Cannot send manual message - chat is in AI mode');
       }
+
+      // 2. Check if session is active (within 24 hours)
+    const lastMessageTime = chat.last_message_time ? new Date(chat.last_message_time) : null;
+    const isSessionActive = lastMessageTime && (Date.now() - lastMessageTime < 24 * 60 * 60 * 1000);
+
+
+
+    // 3. Prepare message payload based on session status
+    let payload;
+    if (isSessionActive) {
+      // Standard message for active sessions
+      payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: chat.phone,
+        type: "text",
+        text: { body: message }
+      };
+    } else {
+      // Use template message for inactive sessions
+      payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: chat.phone,
+        type: "template",
+        template: {
+          name: "human_reply", // You must create this template in WhatsApp Manager
+          language: { code: "en" },
+          components: [{
+            type: "body",
+            parameters: [{
+              type: "text",
+              text: message
+            }]
+          }]
+        }
+      };
+    }
+
+    // 4. Insert message with initial status
+    [dbResult] = await connection.query(
+      `INSERT INTO messages 
+       (chat_id, sender_type, agent_id, content, direction, status, created_at)
+       VALUES (?, 'agent', ?, ?, 'outgoing', 'sending', UTC_TIMESTAMP())`,
+      [chat_id, fixedAgentId, message]
+    );
   
-      // Insert message with fixed agent ID
-      [dbResult] = await connection.query(
-        `INSERT INTO messages 
-         (chat_id, sender_type, agent_id, content, direction, status, created_at)
-         VALUES (?, 'agent', ?, ?, 'outgoing', 'sending', UTC_TIMESTAMP())`,
-        [chat_id, fixedAgentId, message]
-      );
+
   
       // Create message object for real-time update
       const newMessage = {
