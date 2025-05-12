@@ -348,9 +348,9 @@ socket.on('send_manual_message', async ({ chat_id, message }, callback) => {
     // 3. Insert message into database
     [dbResult] = await connection.query(
       `INSERT INTO messages 
-       (chat_id, sender_type, agent_id, content, direction, status, created_at)
-       VALUES (?, 'agent', ?, ?, 'outgoing', 'sending', UTC_TIMESTAMP())`,
-      [chat_id, fixedAgentId, message]
+      (chat_id, sender_type, agent_id, content, direction, status, created_at, timezone_offset)
+      VALUES (?, ?, ?, ?, ?, ?, UTC_TIMESTAMP(), ?)`,
+      [chat_id, 'agent', fixedAgentId, message, 'outgoing', 'sending', 7] // +7 for your timezone
     );
 
     // 4. Send via WhatsApp API
